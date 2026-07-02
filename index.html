@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My PRs</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --accent: #2f81f7;
+    --open: #3fb950; --merged: #a371f7; --closed: #f85149; --draft: #6e7681;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    position: sticky; top: 0; z-index: 10; background: var(--bg);
+    border-bottom: 1px solid var(--border); padding: 16px 24px 0;
+  }
+  .titlebar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  h1 { font-size: 18px; margin: 0; }
+  .spacer { flex: 1; }
+  .meta { color: var(--muted); font-size: 12px; }
+  button, select, input {
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  #search { flex: 1; min-width: 220px; }
+  .linky { background: none; border: none; color: var(--muted); padding: 6px 4px; font-size: 12px; }
+  .linky:hover { color: var(--accent); text-decoration: underline; }
+  .tabs { display: flex; gap: 4px; }
+  .tab {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    border-radius: 0; padding: 10px 14px; color: var(--muted); font-weight: 600;
+  }
+  .tab:hover { color: var(--text); border-color: transparent; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab .count {
+    display: inline-block; margin-left: 6px; padding: 1px 8px; font-size: 12px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 20px; color: var(--muted);
+  }
+  main { padding: 8px 24px 60px; }
+
+  /* repo group */
+  .repo {
+    display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+    padding: 9px 6px; border-bottom: 1px solid var(--border); margin-top: 10px;
+  }
+  .repo:hover .repo-name { color: var(--accent); }
+  .chev { color: var(--muted); width: 12px; display: inline-block; transition: transform .12s; font-size: 11px; }
+  .repo.collapsed .chev { transform: rotate(-90deg); }
+  .repo-name { font-weight: 700; font-size: 13px; }
+  .repo-count { color: var(--muted); font-size: 12px; }
+  .badge { padding: 1px 7px; border-radius: 20px; font-size: 11px; border: 1px solid var(--border); }
+  .badge.host { color: var(--accent); }
+  .badge.draft { color: var(--draft); border-color: var(--draft); }
+
+  /* pr row = hyperlink, two lines */
+  .rows { display: block; }
+  .repo.collapsed + .rows { display: none; }
+  a.pr {
+    display: flex; flex-direction: column; gap: 3px; text-decoration: none; color: var(--text);
+    padding: 8px 8px 8px 22px; border-radius: 6px;
+  }
+  a.pr:hover { background: var(--panel); }
+  .line1 { display: grid; grid-template-columns: 58px 1fr auto; align-items: center; gap: 10px; font-size: 15px; }
+  .num { color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .pr-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+  a.pr:hover .pr-title { text-decoration: underline; }
+  .meta1 { display: flex; align-items: center; gap: 8px; }
+  .when { color: var(--muted); font-size: 12px; white-space: nowrap; text-align: right; }
+  .line2 { padding-left: 68px; margin-top: 1px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; }
+  .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--draft); flex: none; }
+  .pill.good::before { background: var(--open); }
+  .pill.warn::before { background: #d29922; }
+  .pill.bad::before  { background: var(--closed); }
+  .sep { color: var(--border); }
+  /* filled checks badge with text inside */
+  .badge2 { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 20px;
+            font-size: 11.5px; font-weight: 600; border: 1px solid var(--border); color: var(--muted); }
+  .badge2.good { background: rgba(63,185,80,.16);  color: #3fb950; border-color: rgba(63,185,80,.45); }
+  .badge2.bad  { background: rgba(248,81,73,.16);  color: #f85149; border-color: rgba(248,81,73,.45); }
+  .badge2.warn { background: rgba(210,153,34,.16); color: #d29922; border-color: rgba(210,153,34,.45); }
+  .empty, .error { color: var(--muted); text-align: center; padding: 48px 0; }
+  .error { color: var(--closed); }
+</style>
+</head>
+<body>
+<header>
+  <div class="titlebar">
+    <h1>My Pull Requests</h1>
+    <span class="spacer"></span>
+    <span class="meta" id="status">loading…</span>
+    <button id="refresh">↻ Refresh</button>
+  </div>
+  <div class="controls">
+    <input id="search" type="search" placeholder="Search title, repo, #number, or label…" autocomplete="off">
+    <select id="host">
+      <option value="">All hosts</option>
+    </select>
+    <button class="linky" id="expand">expand all</button>
+    <button class="linky" id="collapse">collapse all</button>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-state="open">Open <span class="count" id="c-open">0</span></button>
+    <button class="tab" data-state="merged">Merged <span class="count" id="c-merged">0</span></button>
+    <button class="tab" data-state="closed">Closed <span class="count" id="c-closed">0</span></button>
+  </div>
+</header>
+<main id="list"><div class="empty">loading…</div></main>
+
+<script>
+const state = { prs: [], tab: "open", q: "", host: "", loaded: false, collapsed: new Set() };
+
+const $ = (s) => document.querySelector(s);
+const fmtRel = (iso) => {
+  if (!iso || iso.startsWith("0001")) return "";
+  const d = new Date(iso), s = (Date.now() - d) / 1000;
+  const u = [["yr",31536000],["mo",2592000],["d",86400],["h",3600],["m",60]];
+  for (const [label, secs] of u) { const n = Math.floor(s / secs); if (n >= 1) return `${n}${label} ago`; }
+  return "just now";
+};
+const esc = (t) => (t ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function load() {
+  $("#refresh").disabled = true;
+  $("#status").textContent = "fetching…";
+  try {
+    const r = await fetch("/api/prs");
+    const data = await r.json();
+    state.prs = data.prs || [];
+    state.loaded = true;
+    const sel = $("#host");
+    const hosts = [...new Set(state.prs.map((p) => p.hostLabel))];
+    if (sel.options.length <= 1) {
+      hosts.forEach((h) => { const o = document.createElement("option"); o.value = h; o.textContent = h; sel.appendChild(o); });
+    }
+    $("#c-open").textContent = data.counts.open;
+    $("#c-merged").textContent = data.counts.merged;
+    $("#c-closed").textContent = data.counts.closed;
+    const errs = (data.errors || []).map((e) => `${e.host}: ${e.error}`).join(" · ");
+    const win = data.windowDays ? `last ${data.windowDays}d · ` : "";
+    $("#status").textContent = `${win}${state.prs.length} PRs · updated ${new Date().toLocaleTimeString()}` + (errs ? ` · ⚠ ${errs}` : "");
+  } catch (e) {
+    $("#status").textContent = "error";
+    $("#list").innerHTML = `<div class="error">Failed to load: ${esc(String(e))}<br>Is the server running?</div>`;
+  }
+  $("#refresh").disabled = false;
+  render();
+}
+
+function render() {
+  if (!state.loaded) return;
+  const q = state.q.trim().toLowerCase();
+  const num = q.replace(/^#/, "");
+  const searching = q.length > 0;
+
+  const rows = state.prs.filter((p) => {
+    if (p.state !== state.tab) return false;
+    if (state.host && p.hostLabel !== state.host) return false;
+    if (!q) return true;
+    const labels = (p.labels || []).map((l) => l.name).join(" ").toLowerCase();
+    return (
+      p.title.toLowerCase().includes(q) ||
+      p.repository.nameWithOwner.toLowerCase().includes(q) ||
+      String(p.number).includes(num) ||
+      labels.includes(q)
+    );
+  });
+
+  // group by repo, order repos by most-recent activity
+  const groups = new Map();
+  for (const p of rows) {
+    const k = p.repository.nameWithOwner;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(p);
+  }
+  const ordered = [...groups.entries()].sort(
+    (a, b) => (b[1][0].updatedAt || "").localeCompare(a[1][0].updatedAt || "")
+  );
+
+  const list = $("#list");
+  if (!ordered.length) { list.innerHTML = `<div class="empty">No ${state.tab} PRs${searching ? " match your search" : ""} in this window.</div>`; return; }
+
+  list.innerHTML = ordered.map(([repo, prs]) => {
+    const collapsed = !searching && state.collapsed.has(repo);
+    const host = prs[0].hostLabel;
+    const rowsHtml = prs.map((p) => {
+      // combine draft/for-review with the review decision into one indicator
+      let rv = p.review || { label: "—", cls: "none" };
+      if (p.state === "open" && p.isDraft) rv = { label: "draft", cls: "none" };
+      const ck = p.checks || { label: "—", cls: "none" };
+      return `<a class="pr" href="${esc(p.url)}" target="_blank" rel="noopener">
+        <div class="line1">
+          <span class="num">#${p.number}</span>
+          <span class="pr-title">${esc(p.title)}</span>
+          <span class="meta1">
+            <span class="pill ${rv.cls}">${esc(rv.label)}</span>
+            <span class="sep">·</span>
+            <span class="when">${fmtRel(p.updatedAt)}</span>
+          </span>
+        </div>
+        <div class="line2">
+          <span class="badge2 ${ck.cls}">${esc(ck.label)}</span>
+        </div>
+      </a>`;
+    }).join("");
+    return `<div class="repo ${collapsed ? "collapsed" : ""}" data-repo="${esc(repo)}">
+        <span class="chev">▾</span>
+        <span class="repo-name">${esc(repo)}</span>
+        <span class="repo-count">${prs.length}</span>
+        <span class="badge host">${esc(host)}</span>
+      </div>
+      <div class="rows">${rowsHtml}</div>`;
+  }).join("");
+}
+
+// fold/unfold a repo (event delegation)
+$("#list").addEventListener("click", (e) => {
+  const head = e.target.closest(".repo");
+  if (!head) return;
+  const repo = head.dataset.repo;
+  if (state.collapsed.has(repo)) state.collapsed.delete(repo);
+  else state.collapsed.add(repo);
+  head.classList.toggle("collapsed");
+});
+
+const allRepos = () => new Set(
+  state.prs.filter((p) => p.state === state.tab && (!state.host || p.hostLabel === state.host))
+           .map((p) => p.repository.nameWithOwner)
+);
+$("#expand").addEventListener("click", () => { state.collapsed.clear(); render(); });
+$("#collapse").addEventListener("click", () => { state.collapsed = allRepos(); render(); });
+
+document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
+  document.querySelector(".tab.active").classList.remove("active");
+  t.classList.add("active");
+  state.tab = t.dataset.state;
+  render();
+}));
+$("#search").addEventListener("input", (e) => { state.q = e.target.value; render(); });
+$("#host").addEventListener("change", (e) => { state.host = e.target.value; render(); });
+$("#refresh").addEventListener("click", load);
+
+load();
+</script>
+</body>
+</html>
