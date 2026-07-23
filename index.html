@@ -90,6 +90,14 @@
   .badge2.warn { background: rgba(210,153,34,.16); color: #d29922; border-color: rgba(210,153,34,.45); }
   .empty, .error { color: var(--muted); text-align: center; padding: 48px 0; }
   .error { color: var(--closed); }
+
+  /* PR stack: PRs whose base branch is another PR's head branch.
+     No boxed container — a light header plus progressive indent per depth. */
+  .stack { margin: 4px 0; }
+  .stack-head { font-size: 12px; font-weight: 600; color: var(--muted); padding: 8px 8px 2px 22px; }
+  .stack-head .chn { color: var(--accent); }
+  .basenote { color: var(--muted); font-size: 12px; margin-left: 10px; }
+  .basenote.root { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -117,7 +125,8 @@
 <main id="list"><div class="empty">loading…</div></main>
 
 <script>
-const state = { prs: [], tab: "open", q: "", host: "", loaded: false, collapsed: new Set() };
+const state = { prs: [], tab: "open", q: "", host: "", loaded: false, collapsed: new Set(), inflight: false };
+const POLL_MS = 60000; // auto-refresh every 1 minute
 
 const $ = (s) => document.querySelector(s);
 const fmtRel = (iso) => {
@@ -130,6 +139,8 @@ const fmtRel = (iso) => {
 const esc = (t) => (t ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 async function load() {
+  if (state.inflight) return;            // don't stack overlapping polls
+  state.inflight = true;
   $("#refresh").disabled = true;
   $("#status").textContent = "fetching…";
   try {
@@ -147,10 +158,12 @@ async function load() {
     $("#c-closed").textContent = data.counts.closed;
     const errs = (data.errors || []).map((e) => `${e.host}: ${e.error}`).join(" · ");
     const win = data.windowDays ? `last ${data.windowDays}d · ` : "";
-    $("#status").textContent = `${win}${state.prs.length} PRs · updated ${new Date().toLocaleTimeString()}` + (errs ? ` · ⚠ ${errs}` : "");
+    $("#status").textContent = `${win}${state.prs.length} PRs · updated ${new Date().toLocaleTimeString()} · auto every 1m` + (errs ? ` · ⚠ ${errs}` : "");
   } catch (e) {
     $("#status").textContent = "error";
     $("#list").innerHTML = `<div class="error">Failed to load: ${esc(String(e))}<br>Is the server running?</div>`;
+  } finally {
+    state.inflight = false;
   }
   $("#refresh").disabled = false;
   render();
@@ -192,33 +205,69 @@ function render() {
   list.innerHTML = ordered.map(([repo, prs]) => {
     const collapsed = !searching && state.collapsed.has(repo);
     const host = prs[0].hostLabel;
-    const rowsHtml = prs.map((p) => {
-      // combine draft/for-review with the review decision into one indicator
-      let rv = p.review || { label: "—", cls: "none" };
-      if (p.state === "open" && p.isDraft) rv = { label: "draft", cls: "none" };
-      const ck = p.checks || { label: "—", cls: "none" };
-      return `<a class="pr" href="${esc(p.url)}" target="_blank" rel="noopener">
-        <div class="line1">
-          <span class="num">#${p.number}</span>
-          <span class="pr-title">${esc(p.title)}</span>
-          <span class="meta1">
-            <span class="pill ${rv.cls}">${esc(rv.label)}</span>
-            <span class="sep">·</span>
-            <span class="when">${fmtRel(p.updatedAt)}</span>
-          </span>
-        </div>
-        <div class="line2">
-          <span class="badge2 ${ck.cls}">${esc(ck.label)}</span>
-        </div>
-      </a>`;
-    }).join("");
     return `<div class="repo ${collapsed ? "collapsed" : ""}" data-repo="${esc(repo)}">
         <span class="chev">▾</span>
         <span class="repo-name">${esc(repo)}</span>
         <span class="repo-count">${prs.length}</span>
         <span class="badge host">${esc(host)}</span>
       </div>
-      <div class="rows">${rowsHtml}</div>`;
+      <div class="rows">${repoBodyHtml(prs)}</div>`;
+  }).join("");
+}
+
+// One PR row (two lines). When inStack, show how it links into the stack.
+function prRowHtml(p, inStack) {
+  let rv = p.review || { label: "—", cls: "none" };
+  if (p.state === "open" && p.isDraft) rv = { label: "draft", cls: "none" };
+  const ck = p.checks || { label: "—", cls: "none" };
+  let baseNote = "";
+  let styleAttr = "";
+  if (inStack) {
+    baseNote = p.stackBaseNumber
+      ? `<span class="basenote">↳ on #${p.stackBaseNumber}</span>`
+      : `<span class="basenote root">base of stack</span>`;
+    // Indent each level of the stack a little further than the one it sits on.
+    styleAttr = ` style="padding-left:${22 + (p.stackDepth || 0) * 24}px"`;
+  }
+  return `<a class="pr${inStack ? " stacked" : ""}"${styleAttr} href="${esc(p.url)}" target="_blank" rel="noopener">
+    <div class="line1">
+      <span class="num">#${p.number}</span>
+      <span class="pr-title">${esc(p.title)}</span>
+      <span class="meta1">
+        <span class="pill ${rv.cls}">${esc(rv.label)}</span>
+        <span class="sep">·</span>
+        <span class="when">${fmtRel(p.updatedAt)}</span>
+      </span>
+    </div>
+    <div class="line2">
+      <span class="badge2 ${ck.cls}">${esc(ck.label)}</span>${baseNote}
+    </div>
+  </a>`;
+}
+
+// Render a repo's PRs, keeping stack members grouped + ordered base→tip.
+// Items (stacks and standalone PRs) are ordered by most recent activity.
+function repoBodyHtml(prs) {
+  const stacks = new Map();
+  const items = [];
+  for (const p of prs) {
+    if (p.stackId) {
+      let it = stacks.get(p.stackId);
+      if (!it) { it = { stack: true, updated: "", prs: [] }; stacks.set(p.stackId, it); items.push(it); }
+      it.prs.push(p);
+      if ((p.updatedAt || "") > it.updated) it.updated = p.updatedAt || "";
+    } else {
+      items.push({ stack: false, updated: p.updatedAt || "", prs: [p] });
+    }
+  }
+  items.sort((a, b) => (b.updated || "").localeCompare(a.updated || ""));
+  return items.map((it) => {
+    if (!it.stack) return prRowHtml(it.prs[0], false);
+    const chain = it.prs.slice().sort((a, b) => (a.stackDepth || 0) - (b.stackDepth || 0));
+    return `<div class="stack">
+      <div class="stack-head"><span class="chn">⛓</span> Stack · ${chain.length} PRs</div>
+      <div class="stack-body">${chain.map((p) => prRowHtml(p, true)).join("")}</div>
+    </div>`;
   }).join("");
 }
 
@@ -248,6 +297,11 @@ document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () 
 $("#search").addEventListener("input", (e) => { state.q = e.target.value; render(); });
 $("#host").addEventListener("change", (e) => { state.host = e.target.value; render(); });
 $("#refresh").addEventListener("click", load);
+
+// Auto-refresh: poll every minute, but only while the tab is visible so we
+// don't fire `gh` calls in the background. Catch up immediately on return.
+let poll = setInterval(() => { if (!document.hidden) load(); }, POLL_MS);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 
 load();
 </script>

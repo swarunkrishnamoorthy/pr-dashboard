@@ -17,6 +17,7 @@ import threading
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -78,38 +79,143 @@ def _check_class(item):
     return "fail"
 
 
+# GraphQL: fetch review decision, branch refs, and per-check isRequired in one call.
+# isRequired(pullRequestNumber:) reflects branch-protection required status — the
+# only way to tell a merge-blocking failure from a failing optional check.
+ENRICH_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){"
+    "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+    "baseRefName headRefName reviewDecision "
+    "statusCheckRollup{contexts(first:100){nodes{__typename "
+    "... on CheckRun{status conclusion isRequired(pullRequestNumber:$number)} "
+    "... on StatusContext{state isRequired(pullRequestNumber:$number)}}}}}}}"
+)
+
+
 def enrich(pr):
-    """Add review + checks status to a PR via `gh pr view`. gh infers host from the URL."""
+    """Add review + checks status to a PR.
+
+    Uses GraphQL (not `gh pr view`) so we can read each check's `isRequired`
+    flag: a failing *optional* check must not be reported as required/blocking.
+    """
     pr["review"] = {"label": "—", "cls": "none"}
     pr["checks"] = {"label": "—", "cls": "none"}
-    cmd = ["gh", "pr", "view", pr["url"], "--json", "reviewDecision,statusCheckRollup"]
+    pr["baseRefName"] = ""   # branch this PR targets (for stack detection)
+    pr["headRefName"] = ""   # this PR's own branch
+
+    parts = urlparse(pr["url"])            # .../<owner>/<repo>/pull/<number>
+    seg = parts.path.strip("/").split("/")
+    if len(seg) < 4 or not seg[-1].isdigit():
+        return pr
+    owner, name, number = seg[0], seg[1], seg[-1]
+
+    cmd = ["gh", "api", "graphql", "--hostname", parts.netloc,
+           "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={number}",
+           "-f", f"query={ENRICH_QUERY}"]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if out.returncode != 0:
             return pr
         data = json.loads(out.stdout or "{}")
+        pull = ((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}
     except (subprocess.TimeoutExpired, json.JSONDecodeError):
         return pr
+    if not pull:
+        return pr
 
-    rd = data.get("reviewDecision") or ""
+    pr["baseRefName"] = pull.get("baseRefName") or ""
+    pr["headRefName"] = pull.get("headRefName") or ""
+
+    rd = pull.get("reviewDecision") or ""
     pr["review"] = {
         "APPROVED": {"label": "approved", "cls": "good"},
         "CHANGES_REQUESTED": {"label": "changes requested", "cls": "bad"},
         "REVIEW_REQUIRED": {"label": "review pending", "cls": "warn"},
     }.get(rd, {"label": "no review required", "cls": "none"})
 
-    rollup = data.get("statusCheckRollup") or []
-    if not rollup:
-        pr["checks"] = {"label": "no required actions", "cls": "none"}
-    else:
-        classes = [_check_class(i) for i in rollup]
-        if "fail" in classes:
-            pr["checks"] = {"label": "required actions failing", "cls": "bad"}
-        elif "pending" in classes:
-            pr["checks"] = {"label": "actions in progress", "cls": "warn"}
+    nodes = (((pull.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes")) or []
+    if not nodes:
+        pr["checks"] = {"label": "no checks", "cls": "none"}
+        return pr
+
+    req_fail = req_pending = opt_fail = opt_pending = False
+    for n in nodes:
+        cls = _check_class(n)
+        if n.get("isRequired"):
+            req_fail = req_fail or cls == "fail"
+            req_pending = req_pending or cls == "pending"
         else:
-            pr["checks"] = {"label": "all required actions passing", "cls": "good"}
+            opt_fail = opt_fail or cls == "fail"
+            opt_pending = opt_pending or cls == "pending"
+
+    if req_fail:
+        pr["checks"] = {"label": "required checks failing", "cls": "bad"}
+    elif req_pending:
+        pr["checks"] = {"label": "required checks in progress", "cls": "warn"}
+    elif opt_fail:
+        pr["checks"] = {"label": "optional checks failing", "cls": "warn"}
+    elif opt_pending:
+        pr["checks"] = {"label": "checks in progress", "cls": "warn"}
+    else:
+        pr["checks"] = {"label": "all checks passing", "cls": "good"}
     return pr
+
+
+def compute_stacks(prs):
+    """Detect PR stacks: chains where one open PR's base branch is another open
+    PR's head branch (same host + repo). A PR targeting master/main isn't a stack
+    link because no PR has master as its head. Annotates each stacked PR in place
+    with stackId, stackDepth (0 = base-most), stackSize, and stackBaseNumber.
+    """
+    # Only open PRs — the client shows states in separate tabs, and stacks are
+    # about active work. Detecting across states would render half-empty stacks.
+    open_prs = [p for p in prs if p.get("state") == "open"]
+
+    def key(p, ref):
+        return (p.get("host"), p["repository"]["nameWithOwner"], ref)
+
+    by_head = {key(p, p["headRefName"]): i for i, p in enumerate(open_prs) if p.get("headRefName")}
+
+    parent = [None] * len(open_prs)          # parent[i] = index of the PR that i is stacked on
+    for i, p in enumerate(open_prs):
+        base = p.get("baseRefName")
+        if base:
+            j = by_head.get(key(p, base))
+            if j is not None and j != i:
+                parent[i] = j
+
+    # union-find to group connected chains/trees into stacks
+    uf = list(range(len(open_prs)))
+    def find(x):
+        while uf[x] != x:
+            uf[x] = uf[uf[x]]
+            x = uf[x]
+        return x
+    for i, par in enumerate(parent):
+        if par is not None:
+            uf[find(i)] = find(par)
+
+    comps = {}
+    for i in range(len(open_prs)):
+        comps.setdefault(find(i), []).append(i)
+
+    stack_id = 0
+    for members in comps.values():
+        if len(members) < 2:
+            continue
+        stack_id += 1
+        for i in members:
+            depth, cur, seen = 0, i, set()
+            while parent[cur] is not None and cur not in seen:
+                seen.add(cur)
+                cur = parent[cur]
+                depth += 1
+            p = open_prs[i]
+            p["stackId"] = stack_id
+            p["stackDepth"] = depth
+            p["stackSize"] = len(members)
+            if parent[i] is not None:
+                p["stackBaseNumber"] = open_prs[parent[i]]["number"]
 
 
 def fetch_all():
@@ -122,6 +228,7 @@ def fetch_all():
     if prs:  # enrich with review + checks status, concurrently
         with ThreadPoolExecutor(max_workers=8) as pool:
             prs = list(pool.map(enrich, prs))
+        compute_stacks(prs)
     counts = {"open": 0, "merged": 0, "closed": 0}
     for p in prs:
         counts[p.get("state", "closed")] = counts.get(p.get("state", "closed"), 0) + 1
