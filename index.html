@@ -158,7 +158,8 @@ async function load() {
     $("#c-closed").textContent = data.counts.closed;
     const errs = (data.errors || []).map((e) => `${e.host}: ${e.error}`).join(" · ");
     const win = data.windowDays ? `last ${data.windowDays}d · ` : "";
-    $("#status").textContent = `${win}${state.prs.length} PRs · updated ${new Date().toLocaleTimeString()} · auto every 1m` + (errs ? ` · ⚠ ${errs}` : "");
+    const asOf = new Date(data.fetchedAt || Date.now()).toLocaleTimeString();
+    $("#status").textContent = `${win}${state.prs.length} PRs · data as of ${asOf} · auto every 1m` + (errs ? ` · ⚠ ${errs}` : "");
   } catch (e) {
     $("#status").textContent = "error";
     $("#list").innerHTML = `<div class="error">Failed to load: ${esc(String(e))}<br>Is the server running?</div>`;
@@ -298,9 +299,10 @@ $("#search").addEventListener("input", (e) => { state.q = e.target.value; render
 $("#host").addEventListener("change", (e) => { state.host = e.target.value; render(); });
 $("#refresh").addEventListener("click", load);
 
-// Auto-refresh: poll every minute, but only while the tab is visible so we
-// don't fire `gh` calls in the background. Catch up immediately on return.
-let poll = setInterval(() => { if (!document.hidden) load(); }, POLL_MS);
+// Poll every minute even when the tab is hidden: the server serves a cached
+// snapshot, so a poll is a cheap read rather than a live `gh` fetch. Refocusing
+// still triggers an immediate read so a returning tab is never stale.
+let poll = setInterval(load, POLL_MS);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 
 load();

@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +32,12 @@ JSON_FIELDS = "number,title,state,url,repository,createdAt,updatedAt,closedAt,is
 
 # Only show PRs updated within this many days.
 WINDOW_DAYS = 14
+
+# Concurrent GraphQL enrich calls (review + checks, one per PR).
+ENRICH_WORKERS = 20
+
+# How often the background thread rebuilds the cached PR snapshot.
+REFRESH_SECONDS = 60
 
 
 def fetch_host(entry):
@@ -226,14 +233,48 @@ def fetch_all():
                 errors.append({"host": entry["host"], "error": err})
             prs.extend(rows)
     if prs:  # enrich with review + checks status, concurrently
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=ENRICH_WORKERS) as pool:
             prs = list(pool.map(enrich, prs))
         compute_stacks(prs)
     counts = {"open": 0, "merged": 0, "closed": 0}
     for p in prs:
         counts[p.get("state", "closed")] = counts.get(p.get("state", "closed"), 0) + 1
     prs.sort(key=lambda p: p.get("updatedAt", ""), reverse=True)
-    return {"prs": prs, "errors": errors, "counts": counts, "windowDays": WINDOW_DAYS}
+    fetched_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return {"prs": prs, "errors": errors, "counts": counts,
+            "windowDays": WINDOW_DAYS, "fetchedAt": fetched_at}
+
+
+# The snapshot is rebuilt on a background timer and served from here, so a
+# client poll is a cheap cache read rather than a ~14s live `gh` fetch.
+_cache = {"data": None}
+_cache_lock = threading.Lock()
+
+
+def refresh_cache():
+    """Rebuild the PR snapshot and store it. Returns the fresh snapshot."""
+    data = fetch_all()
+    with _cache_lock:
+        _cache["data"] = data
+    return data
+
+
+def cached_snapshot():
+    """Latest snapshot, computing one synchronously if the cache is cold."""
+    with _cache_lock:
+        data = _cache["data"]
+    return data if data is not None else refresh_cache()
+
+
+def background_refresher():
+    """Rebuild the snapshot every REFRESH_SECONDS. First build is lazy, driven
+    by the initial request, so we sleep before the first rebuild here."""
+    while True:
+        time.sleep(REFRESH_SECONDS)
+        try:
+            refresh_cache()
+        except Exception:  # noqa: BLE001 -- a failed refresh must not kill the loop
+            pass
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -251,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.split("?")[0] == "/api/prs":
             try:
-                payload = json.dumps(fetch_all())
+                payload = json.dumps(cached_snapshot())
                 self._send(200, payload, "application/json")
             except Exception as e:  # noqa: BLE001
                 self._send(500, json.dumps({"error": str(e)}), "application/json")
@@ -272,6 +313,7 @@ def main():
 
     url = f"http://localhost:{args.port}"
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    threading.Thread(target=background_refresher, daemon=True).start()
     print(f"PR dashboard running at {url}  (Ctrl-C to stop)")
     if not args.no_open:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
