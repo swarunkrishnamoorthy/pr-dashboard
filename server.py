@@ -72,12 +72,15 @@ def fetch_host(entry):
 
 
 def _check_class(item):
-    """Normalize one statusCheckRollup entry to pass|pending|fail."""
+    """Normalize one statusCheckRollup entry to pass|pending|cancelled|fail."""
     status = item.get("status")        # CheckRun uses status + conclusion
     if status is not None:
         if status != "COMPLETED":
             return "pending"
-        return "pass" if item.get("conclusion") in ("SUCCESS", "NEUTRAL", "SKIPPED") else "fail"
+        conclusion = item.get("conclusion")
+        if conclusion == "CANCELLED":
+            return "cancelled"
+        return "pass" if conclusion in ("SUCCESS", "NEUTRAL", "SKIPPED") else "fail"
     state = item.get("state")          # StatusContext uses state
     if state == "SUCCESS":
         return "pass"
@@ -145,22 +148,29 @@ def enrich(pr):
         pr["checks"] = {"label": "no checks", "cls": "none"}
         return pr
 
-    req_fail = req_pending = opt_fail = opt_pending = False
+    req_fail = req_pending = req_cancelled = False
+    opt_fail = opt_pending = opt_cancelled = False
     for n in nodes:
         cls = _check_class(n)
         if n.get("isRequired"):
             req_fail = req_fail or cls == "fail"
             req_pending = req_pending or cls == "pending"
+            req_cancelled = req_cancelled or cls == "cancelled"
         else:
             opt_fail = opt_fail or cls == "fail"
             opt_pending = opt_pending or cls == "pending"
+            opt_cancelled = opt_cancelled or cls == "cancelled"
 
     if req_fail:
         pr["checks"] = {"label": "required checks failing", "cls": "bad"}
+    elif req_cancelled:
+        pr["checks"] = {"label": "required checks cancelled", "cls": "warn"}
     elif req_pending:
         pr["checks"] = {"label": "required checks in progress", "cls": "warn"}
     elif opt_fail:
         pr["checks"] = {"label": "optional checks failing", "cls": "warn"}
+    elif opt_cancelled:
+        pr["checks"] = {"label": "some checks cancelled", "cls": "warn"}
     elif opt_pending:
         pr["checks"] = {"label": "checks in progress", "cls": "warn"}
     else:
