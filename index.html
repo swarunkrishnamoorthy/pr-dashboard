@@ -150,8 +150,13 @@ async function load() {
     state.loaded = true;
     const sel = $("#host");
     const hosts = [...new Set(state.prs.map((p) => p.hostLabel))];
-    if (sel.options.length <= 1) {
-      hosts.forEach((h) => { const o = document.createElement("option"); o.value = h; o.textContent = h; sel.appendChild(o); });
+    const known = [...sel.options].map((o) => o.value);
+    if (known.slice().sort().join() !== hosts.slice().sort().join()) {
+      const keep = sel.value;
+      sel.textContent = "";
+      sel.appendChild(new Option("All hosts", ""));
+      hosts.forEach((h) => sel.appendChild(new Option(h, h)));
+      sel.value = hosts.includes(keep) ? keep : "";
     }
     $("#c-open").textContent = data.counts.open;
     $("#c-merged").textContent = data.counts.merged;
