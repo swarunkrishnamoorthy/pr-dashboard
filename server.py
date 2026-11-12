@@ -89,17 +89,110 @@ def _check_class(item):
     return "fail"
 
 
-# GraphQL: fetch review decision, branch refs, and per-check isRequired in one call.
+# GraphQL: fetch review decision, merge queue state, branch refs, push/comment
+# activity, and per-check isRequired in one call.
 # isRequired(pullRequestNumber:) reflects branch-protection required status — the
 # only way to tell a merge-blocking failure from a failing optional check.
 ENRICH_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){"
     "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-    "baseRefName headRefName reviewDecision "
+    "author{login} baseRefName headRefName reviewDecision isInMergeQueue "
+    "commits(last:5){nodes{commit{committedDate}}} "
+    "timelineItems(last:20,itemTypes:[PULL_REQUEST_COMMIT,HEAD_REF_FORCE_PUSHED_EVENT]){"
+    "nodes{__typename "
+    "... on PullRequestCommit{commit{committedDate}} "
+    "... on HeadRefForcePushedEvent{createdAt}}} "
+    "comments(last:50){nodes{author{login __typename}createdAt}} "
+    "reviews(last:50){nodes{author{login __typename}state submittedAt bodyText}} "
+    "reviewThreads(last:50){nodes{comments(last:20){nodes{author{login __typename}createdAt}}}} "
     "statusCheckRollup{contexts(first:100){nodes{__typename "
     "... on CheckRun{status conclusion isRequired(pullRequestNumber:$number)} "
     "... on StatusContext{state isRequired(pullRequestNumber:$number)}}}}}}}"
 )
+
+
+def _latest_push_at(pull):
+    """Best-effort timestamp of the latest commit or force-push on the PR."""
+    stamps = []
+    for node in ((pull.get("commits") or {}).get("nodes") or []):
+        dt = ((node.get("commit") or {}).get("committedDate")) or ""
+        if dt:
+            stamps.append(dt)
+    for node in ((pull.get("timelineItems") or {}).get("nodes") or []):
+        if node.get("__typename") == "HeadRefForcePushedEvent":
+            dt = node.get("createdAt") or ""
+        else:
+            dt = ((node.get("commit") or {}).get("committedDate")) or ""
+        if dt:
+            stamps.append(dt)
+    return max(stamps) if stamps else ""
+
+
+def _is_actionable_author(author, pr_author):
+    if not author:
+        return False
+    if author.get("__typename") == "Bot":
+        return False
+    login = author.get("login") or ""
+    if not login or login == pr_author:
+        return False
+    if login.endswith("[bot]"):
+        return False
+    return True
+
+
+def _builderai_flagged_issues(body):
+    """BuilderAI comments on every push; only treat it as review comments when
+    it actually flagged issues rather than posting an all-clear summary."""
+    text = (body or "").lower()
+    if "no major issues found" in text:
+        return False
+    return "major issue" in text or "changes requested" in text
+
+
+def _has_comments_since_push(pull):
+    """True when a human reviewer or an issue-flagging BuilderAI review
+    commented after the latest commit/force-push on the PR."""
+    latest_push = _latest_push_at(pull)
+    if not latest_push:
+        return False
+    pr_author = ((pull.get("author") or {}).get("login")) or ""
+
+    for c in ((pull.get("comments") or {}).get("nodes") or []):
+        author = c.get("author")
+        login = (author or {}).get("login") or ""
+        if login == "BuilderAI":
+            continue
+        if _is_actionable_author(author, pr_author) and (c.get("createdAt") or "") > latest_push:
+            return True
+
+    for t in ((pull.get("reviewThreads") or {}).get("nodes") or []):
+        for c in ((t.get("comments") or {}).get("nodes") or []):
+            author = c.get("author")
+            login = (author or {}).get("login") or ""
+            # BuilderAI's inline comments are paired with a BuilderAI review,
+            # so skip them here and inspect the review summary below.
+            if login == "BuilderAI":
+                continue
+            if _is_actionable_author(author, pr_author) and (c.get("createdAt") or "") > latest_push:
+                return True
+
+    for r in ((pull.get("reviews") or {}).get("nodes") or []):
+        author = r.get("author")
+        submitted = r.get("submittedAt") or ""
+        if not _is_actionable_author(author, pr_author) or submitted <= latest_push:
+            continue
+        login = (author or {}).get("login") or ""
+        if login == "BuilderAI":
+            if _builderai_flagged_issues(r.get("bodyText")):
+                return True
+            continue
+        # An approval with no written review body isn't a comment to address.
+        if (r.get("state") == "APPROVED") and not (r.get("bodyText") or "").strip():
+            continue
+        return True
+
+    return False
 
 
 def enrich(pr):
@@ -137,11 +230,18 @@ def enrich(pr):
     pr["headRefName"] = pull.get("headRefName") or ""
 
     rd = pull.get("reviewDecision") or ""
-    pr["review"] = {
-        "APPROVED": {"label": "approved", "cls": "good"},
-        "CHANGES_REQUESTED": {"label": "changes requested", "cls": "bad"},
-        "REVIEW_REQUIRED": {"label": "review pending", "cls": "warn"},
-    }.get(rd, {"label": "no review required", "cls": "none"})
+    if pull.get("isInMergeQueue") and rd == "APPROVED":
+        pr["review"] = {"label": "Merging", "cls": "good"}
+    elif rd == "APPROVED":
+        pr["review"] = {"label": "approved", "cls": "good"}
+    elif rd == "CHANGES_REQUESTED":
+        pr["review"] = {"label": "changes requested", "cls": "bad"}
+    elif _has_comments_since_push(pull):
+        pr["review"] = {"label": "review comments", "cls": "warn"}
+    else:
+        pr["review"] = {
+            "REVIEW_REQUIRED": {"label": "review pending", "cls": "warn"},
+        }.get(rd, {"label": "no review required", "cls": "none"})
 
     nodes = (((pull.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes")) or []
     if not nodes:

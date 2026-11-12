@@ -13,9 +13,10 @@ Python's standard library and the [`gh`](https://cli.github.com/) CLI.
 - **Grouped by repo** — collapsible sections; expand-all / collapse-all.
 - **Search** — live filter across title, repo, `#number`, and label.
 - **Last 2 weeks** — only PRs updated within `WINDOW_DAYS` (default 14).
-- **Per-PR status** — review decision (`draft` / `approved` / `changes requested`
-  / `review pending`) and a colored checks badge (`all checks passing` /
-  `required checks failing` / `required checks cancelled` / `checks in progress` /
+- **Per-PR status** — review decision (`draft` / `Merging` / `approved` /
+  `changes requested` / `review comments` / `review pending`) and a colored
+  checks badge (`all checks passing` / `required checks failing` /
+  `required checks cancelled` / `checks in progress` /
   `optional checks failing`), fetched via GraphQL so required vs. optional
   checks are distinguished — a failing optional check isn't shown as blocking.
 - **PR stacks** — stacked PRs (one PR branching off another open PR's head
