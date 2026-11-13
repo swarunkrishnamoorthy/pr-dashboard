@@ -231,7 +231,7 @@ def enrich(pr):
 
     rd = pull.get("reviewDecision") or ""
     if pull.get("isInMergeQueue") and rd == "APPROVED":
-        pr["review"] = {"label": "Merging", "cls": "good"}
+        pr["review"] = {"label": "Merging", "cls": "merging"}
     elif rd == "APPROVED":
         pr["review"] = {"label": "approved", "cls": "good"}
     elif rd == "CHANGES_REQUESTED":
